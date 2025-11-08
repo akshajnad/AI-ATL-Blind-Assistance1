@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 
 from config import get_settings
 from ElevenLabs.main import get_assistant
+from ElevenLabs.obstacle_alert import ObstacleAlertSystem
 
 if __package__ in (None, ""):
     sys.path.append(str(Path(__file__).resolve().parent))
@@ -25,6 +26,12 @@ settings = get_settings()
 assistant = get_assistant()
 pipeline = VisionPipeline()
 _snowflake_llm: Optional[SnowflakeLLM] = None
+# Initialize obstacle alert system with intelligent deduplication and approach detection
+obstacle_alert = ObstacleAlertSystem(
+    min_alert_interval_s=5.0,   # minimum 5 seconds between any alerts
+    object_memory_s=10.0,        # remember objects for 10 seconds
+    alert_cooldown_s=30.0,       # don't re-alert same object within 30 seconds
+)
 
 app = FastAPI(
     title="AI-ATL Blind Assistance",
@@ -65,6 +72,16 @@ async def analyze(payload: FrameAnalysisRequest) -> FrameAnalysisResponse:
         response = pipeline.process(payload)
     except Exception as exc:  # pragma: no cover
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # Process frame through obstacle alert system for continuous monitoring
+    # This runs in parallel with voice interactions and provides proactive safety alerts
+    try:
+        alert_message = obstacle_alert.process_frame(response)
+        if alert_message:
+            print(f"[OBSTACLE ALERT] {alert_message}")
+    except Exception as exc:
+        # Don't fail the request if obstacle detection has issues
+        print(f"[OBSTACLE ALERT] Error processing alerts: {exc}")
 
     update_data: dict[str, Optional[str]] = {}
     if payload.audio_base64:
