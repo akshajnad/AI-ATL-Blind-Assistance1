@@ -1,0 +1,7 @@
+# === CONFIGURATION ===
+ACCOUNT = "QOGVOOL-RYC76187"
+REGION = "us-east-1"
+USER = "ADITYAJHA"
+PASSWORD = "7D8Wt-%iT6dHh9,1!£$!Z9"
+MODEL = "claude-3-5-sonnet"
+

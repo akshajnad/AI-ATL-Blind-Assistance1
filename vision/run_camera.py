@@ -25,11 +25,11 @@ else:
     from .schemas import FrameAnalysisRequest, FrameMetadata, Environment
 
 try:
-    from SnowFlake.processor import SnowflakeRiskProcessor
+    from ElevenLabs.obstacle_alert import ObstacleAlertSystem
 except Exception:
     # fallback: ensure repo root is on path and import
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from SnowFlake.processor import SnowflakeRiskProcessor
+    from ElevenLabs.obstacle_alert import ObstacleAlertSystem
 
 
 def frame_to_base64(frame) -> str:
@@ -92,7 +92,7 @@ def run_camera_loop(device_index: int = 0, fps_limit: float = 1.0) -> None:
         except Exception:
             use_http = False
 
-    processor = SnowflakeRiskProcessor(min_speak_interval_s=3.0) if not use_http else None
+    processor = ObstacleAlertSystem(min_alert_interval_s=5.0, object_memory_s=10.0, alert_cooldown_s=30.0) if not use_http else None
 
     print("Starting camera loop. Press Ctrl+C to stop.")
     last_time = 0.0

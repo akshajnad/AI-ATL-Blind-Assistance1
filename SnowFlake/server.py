@@ -13,13 +13,25 @@ except Exception:
     # support running as script
     from vision.schemas import FrameAnalysisResponse, DetectedObject
 
-from .processor import SnowflakeRiskProcessor
+try:
+    from ElevenLabs.obstacle_alert import ObstacleAlertSystem
+except Exception:
+    # Fallback import
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from ElevenLabs.obstacle_alert import ObstacleAlertSystem
 
 app = FastAPI(title="SnowFlake Bridge", version="0.1")
 
 # short-term memory for last frame
 _memory: dict[str, any] = {}
-processor = SnowflakeRiskProcessor(min_speak_interval_s=2.0)
+# Use enhanced obstacle alert system with deduplication and approach detection
+processor = ObstacleAlertSystem(
+    min_alert_interval_s=3.0,
+    object_memory_s=10.0,
+    alert_cooldown_s=30.0,
+)
 
 
 class ConverseRequest(BaseModel):
@@ -70,8 +82,8 @@ def converse(req: ConverseRequest):
             if objs:
                 top = objs[0]
                 dist_label = "unknown distance"
-                # reuse processor's distance bucket logic
-                dist_label, _ = processor._distance_bucket(top.relative_depth_m)
+                # use processor's distance description
+                dist_label = processor._distance_description(top.relative_depth_m)
                 resp_text = f"The nearest object is a {top.label} {dist_label}."
             else:
                 resp_text = "I don't see any objects right now."
@@ -85,8 +97,13 @@ def converse(req: ConverseRequest):
         elif "what should i do" in text or "what do i do" in text:
             if objs:
                 top = objs[0]
-                action = processor._label_text_action(top.label)
-                resp_text = f"I suggest you {action}."
+                from ElevenLabs.obstacle_alert import DangerLevel
+                danger = DangerLevel.from_distance(top.relative_depth_m)
+                action = processor._action_for_object(top.label, danger)
+                if action:
+                    resp_text = f"I suggest you {action.lower()}."
+                else:
+                    resp_text = "No immediate action needed. Stay aware of your surroundings."
             else:
                 resp_text = "No immediate action needed. Stay aware of your surroundings."
         else:

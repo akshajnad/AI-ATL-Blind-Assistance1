@@ -7,7 +7,7 @@ __pycache__/
 venv/
 
 # Ignore config file with sensitive data
-config.py
+#config.py
 rsa_key.p8
 
 # Python cache and build artifacts

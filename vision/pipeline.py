@@ -28,6 +28,9 @@ except ImportError:  # pragma: no cover - support script execution
         FrameAnalysisResponse,
         Quadrant,
     )
+    from summary import summarize_scene
+else:
+    from .summary import summarize_scene
 
 
 class MiDaSDepthEstimator:
@@ -97,10 +100,12 @@ class VisionPipeline:
                 "Convert to metric units downstream if needed."
             )
         center_summary = self._summarize_center(depth_map, payload.frame_metadata.width, payload.frame_metadata.height)
+        summary = summarize_scene(objects, center_summary)
         return FrameAnalysisResponse(
             frame_id=payload.frame_id,
             objects=objects,
             center_distance=center_summary,
+            vision_summary=summary,
             notes=note,
         )
 

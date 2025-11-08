@@ -1,0 +1,79 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply bg-kora-bg text-kora-text;
+  }
+
+  body {
+    @apply antialiased;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', 'Helvetica Neue', Arial, sans-serif;
+  }
+}
+
+@layer utilities {
+  /* Glass morphism panel */
+  .glass-panel {
+    @apply bg-white/80 backdrop-blur-lg border border-white/20 shadow-kora-lg;
+  }
+
+  /* Frosted glass effect */
+  .frosted {
+    @apply bg-white/60 backdrop-blur-md;
+  }
+
+  /* AR overlay style */
+  .ar-overlay {
+    @apply bg-gradient-to-b from-white/10 to-transparent backdrop-blur-sm;
+  }
+
+  /* Floating card */
+  .floating-card {
+    @apply bg-white rounded-2xl shadow-kora-xl border border-kora-border;
+  }
+
+  /* Glow effect */
+  .glow {
+    @apply shadow-kora-glow;
+  }
+
+  .glow-blue {
+    @apply shadow-kora-glow-blue;
+  }
+}
+
+/* Custom scrollbar - minimal and modern */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-kora-border rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-kora-primary/50;
+}
+
+/* Focus visible styles for accessibility */
+*:focus-visible {
+  @apply outline-none ring-4 ring-kora-primary/50 ring-offset-2;
+}
+
+/* High contrast for touch targets */
+button, a {
+  min-height: 48px;
+  min-width: 48px;
+}
+
+/* Smooth transitions */
+* {
+  @apply transition-colors duration-200;
+}

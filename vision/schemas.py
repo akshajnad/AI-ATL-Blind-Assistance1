@@ -67,10 +67,26 @@ class FrameAnalysisRequest(BaseModel):
     frame_metadata: FrameMetadata
     image_base64: str = Field(..., description="RGB frame encoded as base64 string")
     environment: Environment = Environment.INDOOR
+    audio_base64: Optional[str] = Field(
+        None,
+        description="Optional base64-encoded audio clip (wav/m4a/mp3) to run through ElevenLabs transcription.",
+    )
+    prompt_instructions: Optional[str] = Field(
+        None,
+        description="Custom system prompt to feed along with the vision summary + transcript.",
+    )
+    synthesize_voice: bool = Field(
+        False,
+        description="If true, the Snowflake response will be turned into an ElevenLabs audio clip.",
+    )
 
 
 class FrameAnalysisResponse(BaseModel):
     frame_id: str
     objects: List[DetectedObject]
     center_distance: CenterDistanceSummary
+    vision_summary: str
+    user_transcript: Optional[str] = None
+    llm_response: Optional[str] = None
+    audio_response_base64: Optional[str] = None
     notes: Optional[str] = None
