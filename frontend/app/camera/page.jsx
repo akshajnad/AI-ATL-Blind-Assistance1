@@ -22,6 +22,7 @@ export default function CameraPage() {
   const [caption, setCaption] = useState(INITIAL_CAPTION)
   const [connectionStatus, setConnectionStatus] = useState('connecting')
   const [cameraDimensions, setCameraDimensions] = useState(DEFAULT_DIMENSIONS)
+  const [frameData, setFrameData] = useState(null)
   const [environment] = useState('indoor')
 
   const socketRef = useRef(null)
@@ -48,6 +49,13 @@ export default function CameraPage() {
           width: data.dimensions.width,
           height: data.dimensions.height
         })
+      }
+
+      if (data.frame) {
+        const value = data.frame.startsWith('data:')
+          ? data.frame
+          : `data:image/jpeg;base64,${data.frame}`
+        setFrameData(value)
       }
 
       if (Array.isArray(data.objects)) {
@@ -101,17 +109,20 @@ export default function CameraPage() {
     const handleClose = () => {
       setConnectionStatus('disconnected')
       setCaption('Connection lost. Attempting to reconnect…')
+      setFrameData(null)
     }
 
     const handleError = (error) => {
       console.error('WebSocket error:', error)
       setConnectionStatus('error')
       setCaption('Connection error. Please ensure the vision service is running.')
+      setFrameData(null)
     }
 
     socket.on('open', handleOpen)
     socket.on('close', handleClose)
     socket.on('error', handleError)
+    socket.on('frame', handleDetection)
     socket.on('detection', handleDetection)
     socket.connect()
 
@@ -119,27 +130,12 @@ export default function CameraPage() {
       socket.off('open', handleOpen)
       socket.off('close', handleClose)
       socket.off('error', handleError)
+      socket.off('frame', handleDetection)
       socket.off('detection', handleDetection)
       socket.disconnect()
       socketRef.current = null
     }
   }, [handleDetection])
-
-  const handleFrame = useCallback(
-    (frame) => {
-      if (!frame) return
-
-      if (typeof frame.width === 'number' && typeof frame.height === 'number') {
-        updateCameraDimensions({ width: frame.width, height: frame.height })
-      }
-
-      socketRef.current?.sendFrame({
-        ...frame,
-        environment
-      })
-    },
-    [environment, updateCameraDimensions]
-  )
 
   const handleDescribe = useCallback(() => {
     if (!socketRef.current) return
@@ -157,8 +153,8 @@ export default function CameraPage() {
     <div className="relative flex h-screen w-screen items-center justify-center overflow-hidden bg-black text-white">
       <CameraFeed
         isActive
-        onFrame={handleFrame}
-        onDimensionsChange={updateCameraDimensions}
+        frame={frameData}
+        status={caption}
         className="absolute inset-0 h-full w-full"
       />
 
