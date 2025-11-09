@@ -17,6 +17,7 @@ export default function LivePage() {
   const [connectionStatus, setConnectionStatus] = useState('connecting')
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [cameraDimensions, setCameraDimensions] = useState({ width: 640, height: 480 })
+  const [frameData, setFrameData] = useState(null)
 
   const updateCameraDimensions = useCallback(({ width, height }) => {
     if (typeof width !== 'number' || typeof height !== 'number') return
@@ -46,32 +47,52 @@ export default function LivePage() {
 
     voiceRef.current = createVoiceEngine(apiKey)
 
-    // Socket event handlers
-    socketRef.current.on('open', () => {
+    const handleOpen = () => {
       setConnectionStatus('connected')
       setCaption('Vision system active')
       if (!hasAnnouncedRef.current) {
         voiceRef.current?.speak('Vision system active. Scanning environment.')
         hasAnnouncedRef.current = true
       }
-    })
+    }
 
-    socketRef.current.on('close', () => {
+    const handleClose = () => {
       setConnectionStatus('disconnected')
       setCaption('Connection lost. Reconnecting...')
-    })
+      setFrameData(null)
+    }
 
-    socketRef.current.on('error', (error) => {
+    const handleError = (error) => {
       console.error('WebSocket error:', error)
       setConnectionStatus('error')
-    })
+      setFrameData(null)
+    }
 
+    const handleMessage = (data) => {
+      if (!data || typeof data !== 'object') return
+      if (data.type === 'status' && data.message) {
+        setCaption(data.message)
+      } else if (data.type === 'error' && data.message) {
+        setCaption(data.message)
+        setConnectionStatus('error')
+      }
+    }
+
+    socketRef.current.on('open', handleOpen)
+    socketRef.current.on('close', handleClose)
+    socketRef.current.on('error', handleError)
+    socketRef.current.on('message', handleMessage)
     socketRef.current.on('detection', handleDetection)
 
     socketRef.current.connect()
 
     return () => {
       if (socketRef.current) {
+        socketRef.current.off('open', handleOpen)
+        socketRef.current.off('close', handleClose)
+        socketRef.current.off('error', handleError)
+        socketRef.current.off('message', handleMessage)
+        socketRef.current.off('detection', handleDetection)
         socketRef.current.disconnect()
       }
       if (voiceRef.current) {
@@ -82,7 +103,13 @@ export default function LivePage() {
 
   // Handle detection from backend
   const handleDetection = useCallback((data) => {
-    // Update detections
+    if (!data) return
+
+    if (data.frame) {
+      const value = data.frame.startsWith('data:') ? data.frame : `data:image/jpeg;base64,${data.frame}`
+      setFrameData(value)
+    }
+
     if (data.dimensions) {
       updateCameraDimensions({ width: data.dimensions.width, height: data.dimensions.height })
     }
@@ -98,11 +125,9 @@ export default function LivePage() {
       setDetections(formattedDetections)
     }
 
-    // Update caption and speak
     if (data.message) {
       setCaption(data.message)
 
-      // Debounce speech (don't speak more than once per 3 seconds)
       const now = Date.now()
       if (now - lastSpeechRef.current > 3000) {
         lastSpeechRef.current = now
@@ -112,19 +137,6 @@ export default function LivePage() {
       }
     }
   }, [updateCameraDimensions])
-
-  // Handle camera frames
-  const handleFrame = (frame) => {
-    if (!frame) return
-
-    if (typeof frame.width === 'number' && typeof frame.height === 'number') {
-      updateCameraDimensions({ width: frame.width, height: frame.height })
-    }
-
-    if (socketRef.current?.isConnected()) {
-      socketRef.current.sendFrame(frame)
-    }
-  }
 
   const handleExit = () => {
     voiceRef.current?.speak('Deactivating')
@@ -153,9 +165,8 @@ export default function LivePage() {
       <CameraFeed
         ref={cameraRef}
         isActive={isActive}
-        detections={detections}
-        onFrame={handleFrame}
-        onDimensionsChange={updateCameraDimensions}
+        frame={frameData}
+        status={caption}
         className="absolute inset-0 w-full h-full"
       />
 
