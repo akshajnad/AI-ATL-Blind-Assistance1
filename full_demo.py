@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import io
+import json
 import queue
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -16,6 +19,10 @@ import pygame
 import speech_recognition as sr
 from pydub import AudioSegment
 from pydub.playback import play
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 VISION_DIR = PROJECT_ROOT / "vision"
@@ -35,6 +42,7 @@ WINDOW_DEPTH = "MiDaS Depth"
 
 INACTIVITY_TIMEOUT = 45.0  # seconds of silence before ending the convo
 PROXIMITY_THRESHOLD = 1.0  # meters - play alert if object is closer than this
+STREAM_INTERVAL = 0.1  # seconds between frame broadcasts (~10 FPS)
 
 
 class ProximityAlert:
@@ -192,11 +200,207 @@ class SpeechListener:
             self._stopper = None
 
 
+class FrontendBridge:
+    """Bridges the Python demo with the Next.js frontend via WebSocket streaming."""
+
+    def __init__(self, host: str = "0.0.0.0", port: int = 8000) -> None:
+        self.host = host
+        self.port = port
+        self._app = FastAPI()
+        self._app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+            allow_credentials=True,
+        )
+        self._connections: Set[WebSocket] = set()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._queue: Optional[asyncio.Queue] = None
+        self._thread: Optional[threading.Thread] = None
+        self._server: Optional[uvicorn.Server] = None
+        self._last_detection_json: Optional[str] = None
+        self._ready_event = threading.Event()
+        self._status_payload = json.dumps(
+            {"type": "status", "message": "Connected to Kora realtime backend."}
+        )
+
+        self._configure_routes()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        self._ready_event.wait(timeout=5.0)
+
+    def stop(self) -> None:
+        if not self._loop:
+            return
+
+        def _request_shutdown() -> None:
+            if self._server:
+                self._server.should_exit = True
+
+        self._loop.call_soon_threadsafe(_request_shutdown)
+        if self._thread:
+            self._thread.join(timeout=2.0)
+        self._ready_event.clear()
+
+    def send_detection(self, payload: dict) -> None:
+        payload.setdefault("type", "detection")
+        self._queue_message(payload, remember=True)
+
+    def send_frame(self, payload: dict) -> None:
+        payload.setdefault("type", "frame")
+        self._queue_message(payload, remember=False)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _configure_routes(self) -> None:
+        @self._app.websocket("/ws")
+        async def websocket_endpoint(websocket: WebSocket) -> None:  # pragma: no cover - runtime path
+            await websocket.accept()
+            self._connections.add(websocket)
+
+            try:
+                await websocket.send_text(self._status_payload)
+                if self._last_detection_json:
+                    await websocket.send_text(self._last_detection_json)
+
+                while True:
+                    try:
+                        data = await websocket.receive_text()
+                    except WebSocketDisconnect:
+                        break
+                    except Exception:
+                        continue
+
+                    if not data:
+                        continue
+
+                    try:
+                        message = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if message.get("type") == "describe" and self._last_detection_json:
+                        await websocket.send_text(self._last_detection_json)
+
+            finally:
+                self._connections.discard(websocket)
+
+    def _queue_message(self, payload: dict, *, remember: bool) -> None:
+        if not self._ready_event.is_set() or not self._loop or not self._queue:
+            return
+        try:
+            data = json.dumps(payload)
+        except (TypeError, ValueError):
+            return
+        asyncio.run_coroutine_threadsafe(self._queue.put((data, remember)), self._loop)
+
+    async def _broadcast_loop(self) -> None:  # pragma: no cover - runtime path
+        assert self._queue is not None
+        while True:
+            data, remember = await self._queue.get()
+            stale: Set[WebSocket] = set()
+            for websocket in list(self._connections):
+                try:
+                    await websocket.send_text(data)
+                except Exception:
+                    stale.add(websocket)
+
+            for websocket in stale:
+                self._connections.discard(websocket)
+
+            if remember:
+                self._last_detection_json = data
+
+    def _run(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._queue = asyncio.Queue()
+        self._loop.create_task(self._broadcast_loop())
+        self._ready_event.set()
+        config = uvicorn.Config(self._app, host=self.host, port=self.port, log_level="warning")
+        self._server = uvicorn.Server(config)
+        self._loop.run_until_complete(self._server.serve())
+
 def frame_to_base64(frame: np.ndarray) -> str:
     success, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     if not success:
         raise RuntimeError("Failed to encode frame as JPEG")
     return base64.b64encode(encoded.tobytes()).decode("utf-8")
+
+
+def build_detection_payload(
+    response: FrameAnalysisResponse,
+    dimensions: Tuple[int, int],
+    status: str,
+    environment: Environment,
+) -> dict:
+    width, height = dimensions
+    objects = []
+    for obj in response.objects:
+        bbox = obj.bounding_box
+        objects.append(
+            {
+                "label": obj.label,
+                "confidence": obj.confidence,
+                "bbox": [
+                    float(bbox.x_min * width),
+                    float(bbox.y_min * height),
+                    float(bbox.x_max * width),
+                    float(bbox.y_max * height),
+                ],
+                "distance": obj.relative_depth_m,
+                "quadrant": obj.quadrant.value,
+            }
+        )
+
+    message = response.llm_response or response.vision_summary or status
+
+    payload = {
+        "type": "detection",
+        "frame_id": response.frame_id,
+        "objects": objects,
+        "center_distance": response.center_distance.model_dump(),
+        "message": message,
+        "llm_response": response.llm_response,
+        "user_transcript": response.user_transcript,
+        "notes": response.notes,
+        "status": status,
+        "environment": environment.value,
+        "dimensions": {"width": width, "height": height},
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+    }
+
+    if response.audio_response_base64:
+        payload["audio_response_base64"] = response.audio_response_base64
+
+    return payload
+
+
+def build_frame_payload(
+    frame_base64: str,
+    dimensions: Tuple[int, int],
+    status: str,
+    environment: Environment,
+) -> dict:
+    width, height = dimensions
+    return {
+        "type": "frame",
+        "frame": frame_base64,
+        "width": width,
+        "height": height,
+        "status": status,
+        "environment": environment.value,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+    }
 
 
 def draw_yolo_view(frame: np.ndarray, response: FrameAnalysisResponse) -> np.ndarray:
@@ -511,6 +715,8 @@ def main() -> None:
     parser.add_argument("--voice", action="store_true", help="Enable voice synthesis")
     parser.add_argument("--listen-time", type=float, default=8.0, help="Max seconds per utterance")
     parser.add_argument("--no-alert", action="store_true", help="Disable proximity alert sounds")
+    parser.add_argument("--ws-host", type=str, default="0.0.0.0", help="WebSocket host for the frontend bridge")
+    parser.add_argument("--ws-port", type=int, default=8000, help="WebSocket port for the frontend bridge")
     args = parser.parse_args()
 
     from config import ELEVENLABS_API_KEY, SNOWFLAKE_USER, SNOWFLAKE_ACCOUNT, SNOWFLAKE_MODEL, SNOWFLAKE_PASSWORD
@@ -520,6 +726,8 @@ def main() -> None:
     #print("="*80)
     
     pipeline = VisionPipeline()
+    bridge = FrontendBridge(host=args.ws_host, port=args.ws_port)
+    bridge.start()
     assistant = get_assistant()
     snowflake = SnowflakeLLM(
         account=SNOWFLAKE_ACCOUNT,
@@ -550,16 +758,15 @@ def main() -> None:
     #print(f"Say wake phrase to start\n")
 
     environment = Environment(args.environment)
-    cv2.namedWindow(WINDOW_VISION, cv2.WINDOW_NORMAL)
-    cv2.namedWindow(WINDOW_YOLO, cv2.WINDOW_NORMAL)
-    cv2.namedWindow(WINDOW_DEPTH, cv2.WINDOW_NORMAL)
-
     metadata: Optional[FrameMetadata] = None
     last_run = 0.0
     last_response: Optional[FrameAnalysisResponse] = None
     conversation_active = False
     last_user_activity = 0.0
     status = "Waiting for wake phrase..."
+    last_detection_id_sent: Optional[str] = None
+    last_status_sent: Optional[str] = None
+    last_stream_time = 0.0
 
     try:
         while True:
@@ -567,9 +774,10 @@ def main() -> None:
             if not ret:
                 break
 
-            if metadata is None:
-                height, width = frame.shape[:2]
+            height, width = frame.shape[:2]
+            if metadata is None or metadata.width != width or metadata.height != height:
                 metadata = FrameMetadata(width=width, height=height, focal_length_px=None)
+            dimensions = (width, height)
 
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
@@ -670,20 +878,34 @@ def main() -> None:
                 assistant.reset_history()
                 status = "Waiting for wake phrase..."
 
-            # Update display
             if last_response is not None:
-                annotated = draw_overlay(frame, last_response, environment, last_response.llm_response, status)
-                yolo_view = draw_yolo_view(frame, last_response)
-                depth_view = render_depth(pipeline.last_depth_map, frame.shape[:2])
-                cv2.imshow(WINDOW_VISION, annotated)
-                cv2.imshow(WINDOW_YOLO, yolo_view)
-                cv2.imshow(WINDOW_DEPTH, depth_view)
-                
+                if (last_detection_id_sent != last_response.frame_id) or (last_status_sent != status):
+                    detection_payload = build_detection_payload(last_response, dimensions, status, environment)
+                    bridge.send_detection(detection_payload)
+                    last_detection_id_sent = last_response.frame_id
+                    last_status_sent = status
+
+            if last_response is not None:
+                overlay_frame = draw_overlay(frame, last_response, environment, last_response.llm_response, status)
+            else:
+                overlay_frame = frame
+
+            stream_now = time.time()
+            if stream_now - last_stream_time >= STREAM_INTERVAL:
+                frame_payload = build_frame_payload(
+                    frame_to_base64(overlay_frame),
+                    dimensions,
+                    status,
+                    environment,
+                )
+                bridge.send_frame(frame_payload)
+                last_stream_time = stream_now
+
     finally:
         cap.release()
-        cv2.destroyAllWindows()
         listener.stop()
         pygame.mixer.quit()
+        bridge.stop()
 
 
 if __name__ == "__main__":
