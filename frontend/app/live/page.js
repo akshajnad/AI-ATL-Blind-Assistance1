@@ -11,12 +11,12 @@ import { createVoiceEngine } from '@/lib/voice'
 
 export default function LivePage() {
   const router = useRouter()
-  const [isActive, setIsActive] = useState(true)
   const [detections, setDetections] = useState([])
   const [caption, setCaption] = useState('Initializing vision systems...')
   const [connectionStatus, setConnectionStatus] = useState('connecting')
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [cameraDimensions, setCameraDimensions] = useState({ width: 640, height: 480 })
+  const [frameData, setFrameData] = useState(null)
 
   const updateCameraDimensions = useCallback(({ width, height }) => {
     if (typeof width !== 'number' || typeof height !== 'number') return
@@ -33,6 +33,53 @@ export default function LivePage() {
   const lastSpeechRef = useRef(0)
   const hasAnnouncedRef = useRef(false)
   const cameraRef = useRef(null)
+
+  // Handle detection from backend
+  const handleDetection = useCallback((data) => {
+    if (!data) return
+
+    if (data.dimensions) {
+      updateCameraDimensions({ width: data.dimensions.width, height: data.dimensions.height })
+    }
+
+    if (data.objects) {
+      const formattedDetections = data.objects.map(obj => ({
+        bbox: obj.bbox,
+        label: obj.label || obj.class,
+        confidence: obj.confidence || 0,
+        distance: obj.distance,
+        color: obj.color
+      }))
+      setDetections(formattedDetections)
+    }
+
+    if (data.message) {
+      setCaption(data.message)
+
+      const now = Date.now()
+      if (now - lastSpeechRef.current > 3000) {
+        lastSpeechRef.current = now
+        setIsSpeaking(true)
+        voiceRef.current?.speak(data.message)
+        setTimeout(() => setIsSpeaking(false), 2000)
+      }
+    }
+  }, [updateCameraDimensions])
+
+  const handleFrameMessage = useCallback((data) => {
+    if (!data) return
+
+    if (data.dimensions && typeof data.dimensions.width === 'number' && typeof data.dimensions.height === 'number') {
+      updateCameraDimensions({ width: data.dimensions.width, height: data.dimensions.height })
+    } else if (typeof data.width === 'number' && typeof data.height === 'number') {
+      updateCameraDimensions({ width: data.width, height: data.height })
+    }
+
+    if (data.frame) {
+      setFrameData(data.frame)
+    }
+
+  }, [updateCameraDimensions])
 
   // Initialize WebSocket and Voice
   useEffect(() => {
@@ -67,64 +114,21 @@ export default function LivePage() {
     })
 
     socketRef.current.on('detection', handleDetection)
+    socketRef.current.on('frame', handleFrameMessage)
 
     socketRef.current.connect()
 
     return () => {
       if (socketRef.current) {
+        socketRef.current.off('detection', handleDetection)
+        socketRef.current.off('frame', handleFrameMessage)
         socketRef.current.disconnect()
       }
       if (voiceRef.current) {
         voiceRef.current.stop()
       }
     }
-  }, [handleDetection])
-
-  // Handle detection from backend
-  const handleDetection = useCallback((data) => {
-    // Update detections
-    if (data.dimensions) {
-      updateCameraDimensions({ width: data.dimensions.width, height: data.dimensions.height })
-    }
-
-    if (data.objects) {
-      const formattedDetections = data.objects.map(obj => ({
-        bbox: obj.bbox,
-        label: obj.label || obj.class,
-        confidence: obj.confidence || 0,
-        distance: obj.distance,
-        color: obj.color
-      }))
-      setDetections(formattedDetections)
-    }
-
-    // Update caption and speak
-    if (data.message) {
-      setCaption(data.message)
-
-      // Debounce speech (don't speak more than once per 3 seconds)
-      const now = Date.now()
-      if (now - lastSpeechRef.current > 3000) {
-        lastSpeechRef.current = now
-        setIsSpeaking(true)
-        voiceRef.current?.speak(data.message)
-        setTimeout(() => setIsSpeaking(false), 2000)
-      }
-    }
-  }, [updateCameraDimensions])
-
-  // Handle camera frames
-  const handleFrame = (frame) => {
-    if (!frame) return
-
-    if (typeof frame.width === 'number' && typeof frame.height === 'number') {
-      updateCameraDimensions({ width: frame.width, height: frame.height })
-    }
-
-    if (socketRef.current?.isConnected()) {
-      socketRef.current.sendFrame(frame)
-    }
-  }
+  }, [handleDetection, handleFrameMessage])
 
   const handleExit = () => {
     voiceRef.current?.speak('Deactivating')
@@ -152,9 +156,9 @@ export default function LivePage() {
       {/* Full-screen camera */}
       <CameraFeed
         ref={cameraRef}
-        isActive={isActive}
-        detections={detections}
-        onFrame={handleFrame}
+        frameData={frameData}
+        width={cameraDimensions.width}
+        height={cameraDimensions.height}
         onDimensionsChange={updateCameraDimensions}
         className="absolute inset-0 w-full h-full"
       />

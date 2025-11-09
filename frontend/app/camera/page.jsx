@@ -23,6 +23,7 @@ export default function CameraPage() {
   const [connectionStatus, setConnectionStatus] = useState('connecting')
   const [cameraDimensions, setCameraDimensions] = useState(DEFAULT_DIMENSIONS)
   const [environment] = useState('indoor')
+  const [frameData, setFrameData] = useState(null)
 
   const socketRef = useRef(null)
 
@@ -82,6 +83,20 @@ export default function CameraPage() {
     [updateCameraDimensions]
   )
 
+  const handleFrame = useCallback((data) => {
+    if (!data) return
+
+    if (data.dimensions && typeof data.dimensions.width === 'number' && typeof data.dimensions.height === 'number') {
+      updateCameraDimensions({ width: data.dimensions.width, height: data.dimensions.height })
+    } else if (typeof data.width === 'number' && typeof data.height === 'number') {
+      updateCameraDimensions({ width: data.width, height: data.height })
+    }
+
+    if (data.frame) {
+      setFrameData(data.frame)
+    }
+  }, [updateCameraDimensions])
+
   useEffect(() => {
     const wsUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000/ws'
     const socket = createSocket(wsUrl, {
@@ -113,6 +128,7 @@ export default function CameraPage() {
     socket.on('close', handleClose)
     socket.on('error', handleError)
     socket.on('detection', handleDetection)
+    socket.on('frame', handleFrame)
     socket.connect()
 
     return () => {
@@ -120,26 +136,11 @@ export default function CameraPage() {
       socket.off('close', handleClose)
       socket.off('error', handleError)
       socket.off('detection', handleDetection)
+      socket.off('frame', handleFrame)
       socket.disconnect()
       socketRef.current = null
     }
-  }, [handleDetection])
-
-  const handleFrame = useCallback(
-    (frame) => {
-      if (!frame) return
-
-      if (typeof frame.width === 'number' && typeof frame.height === 'number') {
-        updateCameraDimensions({ width: frame.width, height: frame.height })
-      }
-
-      socketRef.current?.sendFrame({
-        ...frame,
-        environment
-      })
-    },
-    [environment, updateCameraDimensions]
-  )
+  }, [handleDetection, handleFrame])
 
   const handleDescribe = useCallback(() => {
     if (!socketRef.current) return
@@ -156,8 +157,9 @@ export default function CameraPage() {
   return (
     <div className="relative flex h-screen w-screen items-center justify-center overflow-hidden bg-black text-white">
       <CameraFeed
-        isActive
-        onFrame={handleFrame}
+        frameData={frameData}
+        width={cameraDimensions.width}
+        height={cameraDimensions.height}
         onDimensionsChange={updateCameraDimensions}
         className="absolute inset-0 h-full w-full"
       />

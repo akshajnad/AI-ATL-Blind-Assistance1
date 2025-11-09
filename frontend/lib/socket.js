@@ -17,6 +17,7 @@ export class KoraSocket {
       error: [],
       message: [],
       detection: [],
+      frame: [],
     }
   }
 
@@ -54,6 +55,10 @@ export class KoraSocket {
           // If it's a detection message, emit detection event
           if (data.type === 'detection' || data.objects || data.bbox) {
             this.emit('detection', data)
+          }
+
+          if (data.type === 'frame' || data.frame) {
+            this.emit('frame', data)
           }
         } catch (error) {
           console.error('Failed to parse message:', error)
