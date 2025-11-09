@@ -29,6 +29,7 @@ from ElevenLabs.main import get_assistant
 from vision.integrations.snowflake_client import SnowflakeLLM
 from vision.pipeline import VisionPipeline
 from vision.schemas import Environment, FrameAnalysisRequest, FrameAnalysisResponse, FrameMetadata, Quadrant
+from vision.streaming import StreamServer
 
 WINDOW_VISION = "Assistive Overlay"
 WINDOW_YOLO = "YOLO Detections"
@@ -367,6 +368,13 @@ def main() -> None:
     parser.add_argument("--prompt", type=str, default=None, help="Optional custom system instructions for SnowFlake")
     parser.add_argument("--voice", action="store_true", help="Speak Snowflake responses via ElevenLabs")
     parser.add_argument("--listen-time", type=float, default=7.0, help="Max seconds per utterance")
+    parser.add_argument("--ws-host", type=str, default="0.0.0.0", help="Host interface for the vision WebSocket server")
+    parser.add_argument("--ws-port", type=int, default=8000, help="Port for the vision WebSocket server")
+    parser.add_argument(
+        "--show-windows",
+        action="store_true",
+        help="Display legacy OpenCV visualization windows",
+    )
     args = parser.parse_args()
 
     settings = get_settings()
@@ -388,6 +396,13 @@ def main() -> None:
         model=settings.snowflake_model,
     )
 
+    stream_server = StreamServer(host=args.ws_host, port=args.ws_port)
+    stream_server.start()
+    broadcast = stream_server.broadcast
+    environment = Environment(args.environment)
+    broadcast.set_environment(environment)
+    broadcast.send_status("Vision stream initializing...")
+
     cap = cv2.VideoCapture(args.camera, cv2.CAP_DSHOW)
     if not cap.isOpened():
         raise RuntimeError(f"Unable to open webcam index {args.camera}")
@@ -398,10 +413,11 @@ def main() -> None:
     beep_controller = ProximityBeepController()
     print(f"[VOICE] Background listener ready (phrase limit {args.listen_time}s). Speak any time.")
 
-    environment = Environment(args.environment)
-    cv2.namedWindow(WINDOW_VISION, cv2.WINDOW_NORMAL)
-    cv2.namedWindow(WINDOW_YOLO, cv2.WINDOW_NORMAL)
-    cv2.namedWindow(WINDOW_DEPTH, cv2.WINDOW_NORMAL)
+    show_windows = args.show_windows
+    if show_windows:
+        cv2.namedWindow(WINDOW_VISION, cv2.WINDOW_NORMAL)
+        cv2.namedWindow(WINDOW_YOLO, cv2.WINDOW_NORMAL)
+        cv2.namedWindow(WINDOW_DEPTH, cv2.WINDOW_NORMAL)
 
     metadata: Optional[FrameMetadata] = None
     last_run = 0.0
@@ -411,6 +427,11 @@ def main() -> None:
 
     try:
         while True:
+            current_env = broadcast.environment
+            if current_env != environment:
+                environment = current_env
+                print(f"[STATE] Environment updated via frontend: {environment.value}")
+
             ret, frame = cap.read()
             if not ret:
                 print("Failed to capture frame. Exiting.")
@@ -420,9 +441,10 @@ def main() -> None:
                 height, width = frame.shape[:2]
                 metadata = FrameMetadata(width=width, height=height, focal_length_px=None)
 
-            key = cv2.waitKey(1) & 0xFF
-            if key in (ord("q"), 27):
-                break
+            if show_windows:
+                key = cv2.waitKey(1) & 0xFF
+                if key in (ord("q"), 27):
+                    break
 
             now = time.time()
             speech_audio = listener.get_audio()
@@ -480,6 +502,16 @@ def main() -> None:
                     nearest_object_depth(response),
                     center_object_depth(response),
                 )
+                try:
+                    frame_base64 = frame_to_base64(frame)
+                except Exception as exc:
+                    print(f"[STREAM] Failed to encode frame for broadcast: {exc}")
+                else:
+                    broadcast.publish_detection(
+                        response,
+                        (metadata.width, metadata.height),
+                        frame_base64=frame_base64,
+                    )
                 log_packages(response)
                 if response.user_transcript:
                     last_user_activity = now
@@ -503,17 +535,23 @@ def main() -> None:
                     nearest_object_depth(last_response),
                     center_object_depth(last_response),
                 )
-                annotated = draw_overlay(frame, last_response, environment, last_response.llm_response)
-                yolo_view = draw_yolo_view(frame, last_response)
-                depth_view = render_depth(pipeline.last_depth_map, frame.shape[:2])
-                cv2.imshow(WINDOW_VISION, annotated)
-                cv2.imshow(WINDOW_YOLO, yolo_view)
-                cv2.imshow(WINDOW_DEPTH, depth_view)
+                if show_windows:
+                    annotated = draw_overlay(frame, last_response, environment, last_response.llm_response)
+                    yolo_view = draw_yolo_view(frame, last_response)
+                    depth_view = render_depth(pipeline.last_depth_map, frame.shape[:2])
+                    cv2.imshow(WINDOW_VISION, annotated)
+                    cv2.imshow(WINDOW_YOLO, yolo_view)
+                    cv2.imshow(WINDOW_DEPTH, depth_view)
+    except KeyboardInterrupt:
+        print("\n[STATE] Interrupted by user. Shutting down...")
     finally:
         cap.release()
-        cv2.destroyAllWindows()
+        if show_windows:
+            cv2.destroyAllWindows()
         listener.stop()
         beep_controller.stop()
+        broadcast.send_status("Vision stream stopped.")
+        stream_server.stop()
 
 
 if __name__ == "__main__":
