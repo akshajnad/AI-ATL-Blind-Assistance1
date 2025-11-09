@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { motion, AnimatePresence } from 'framer-motion'
 import CameraFeed from '@/components/CameraFeed'
@@ -23,6 +23,11 @@ export default function LivePage() {
   const lastSpeechRef = useRef(0)
   const hasAnnouncedRef = useRef(false)
   const cameraRef = useRef(null)
+  const cameraDimensionsRef = useRef(cameraDimensions)
+
+  useEffect(() => {
+    cameraDimensionsRef.current = cameraDimensions
+  }, [cameraDimensions])
 
   // Initialize WebSocket and Voice
   useEffect(() => {
@@ -62,47 +67,62 @@ export default function LivePage() {
 
     return () => {
       if (socketRef.current) {
+        socketRef.current.off('detection', handleDetection)
         socketRef.current.disconnect()
       }
       if (voiceRef.current) {
         voiceRef.current.stop()
       }
     }
-  }, [])
+  }, [handleDetection])
 
   // Handle detection from backend
-  const handleDetection = (data) => {
+  const handleDetection = useCallback((data) => {
+    const dims = cameraDimensionsRef.current
+
     // Update detections
     if (data.objects) {
       const formattedDetections = data.objects.map(obj => ({
-        bbox: obj.bbox,
+        bbox: obj.bbox && dims.width && dims.height
+          ? [
+              obj.bbox[0] * dims.width,
+              obj.bbox[1] * dims.height,
+              obj.bbox[2] * dims.width,
+              obj.bbox[3] * dims.height,
+            ]
+          : null,
         label: obj.label || obj.class,
         confidence: obj.confidence || 0,
-        distance: obj.distance,
+        distance: obj.distance ?? obj.relative_depth_m,
         color: obj.color
-      }))
+      })).filter(det => det.bbox)
       setDetections(formattedDetections)
     }
 
     // Update caption and speak
-    if (data.message) {
-      setCaption(data.message)
+    if (data.message || data.vision_summary) {
+      const text = data.message || data.vision_summary
+      setCaption(text)
 
       // Debounce speech (don't speak more than once per 3 seconds)
       const now = Date.now()
       if (now - lastSpeechRef.current > 3000) {
         lastSpeechRef.current = now
         setIsSpeaking(true)
-        voiceRef.current?.speak(data.message)
+        voiceRef.current?.speak(text)
         setTimeout(() => setIsSpeaking(false), 2000)
       }
     }
-  }
+  }, [])
 
   // Handle camera frames
   const handleFrame = (frameData) => {
     if (socketRef.current?.isConnected()) {
-      socketRef.current.sendFrame(frameData)
+      socketRef.current.sendFrame(frameData, {
+        width: cameraDimensions.width,
+        height: cameraDimensions.height,
+        environment: 'indoor'
+      })
     }
   }
 
@@ -135,6 +155,7 @@ export default function LivePage() {
         isActive={isActive}
         detections={detections}
         onFrame={handleFrame}
+        onDimensions={setCameraDimensions}
         className="absolute inset-0 w-full h-full"
       />
 

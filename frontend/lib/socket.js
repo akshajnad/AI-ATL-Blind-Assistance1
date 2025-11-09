@@ -76,12 +76,17 @@ export class KoraSocket {
     return false
   }
 
-  sendFrame(imageData) {
+  sendFrame(imageData, metadata = {}) {
     // Send base64 encoded frame for analysis
+    const frameId = metadata.frameId || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}`)
     this.send({
       type: 'frame',
       data: imageData,
       timestamp: Date.now(),
+      frame_id: frameId,
+      width: metadata.width,
+      height: metadata.height,
+      environment: metadata.environment,
     })
   }
 
