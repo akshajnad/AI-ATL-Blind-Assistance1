@@ -85,6 +85,9 @@ class DetectionBroadcast:
         self._clients: set[WebSocket] = set()
         self._lock = asyncio.Lock()
         self._latest_detection: Optional[dict] = None
+        self._latest_detection_at: float = 0.0
+        self._latest_frame: Optional[dict] = None
+        self._latest_frame_at: float = 0.0
         self._status_message: Optional[dict] = {"type": "status", "message": "Vision stream idle."}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._environment = Environment.INDOOR
@@ -124,12 +127,22 @@ class DetectionBroadcast:
             self._clients.discard(websocket)
 
     async def send_latest(self, websocket: WebSocket) -> None:
+        sent_payload = False
         if self._latest_detection is not None:
             await websocket.send_json(self._latest_detection)
-        elif self._status_message is not None:
-            await websocket.send_json(self._status_message)
-        else:
-            await websocket.send_json({"type": "status", "message": "Waiting for vision data."})
+            sent_payload = True
+
+        if self._latest_frame is not None and (
+            self._latest_frame_at >= self._latest_detection_at or not sent_payload
+        ):
+            await websocket.send_json(self._latest_frame)
+            sent_payload = True
+
+        if not sent_payload:
+            if self._status_message is not None:
+                await websocket.send_json(self._status_message)
+            else:
+                await websocket.send_json({"type": "status", "message": "Waiting for vision data."})
 
     async def _broadcast(self, message: dict) -> None:
         clients: list[WebSocket]
@@ -161,6 +174,31 @@ class DetectionBroadcast:
     ) -> None:
         payload = serialize_detection(response, dimensions, frame_base64=frame_base64)
         self._latest_detection = payload
+        self._latest_detection_at = time.time()
+        self._status_message = None
+        self._submit(self._broadcast(payload))
+
+        if frame_base64:
+            self.publish_frame(frame_base64, dimensions)
+
+    def publish_frame(self, frame_base64: str, dimensions: Tuple[int, int]) -> None:
+        if not frame_base64:
+            return
+
+        width, height = dimensions
+        if frame_base64.startswith("data:"):
+            frame_value = frame_base64
+        else:
+            frame_value = f"data:image/jpeg;base64,{frame_base64}"
+
+        payload = {
+            "type": "frame",
+            "frame": frame_value,
+            "dimensions": {"width": width, "height": height},
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
+        self._latest_frame = payload
+        self._latest_frame_at = time.time()
         self._status_message = None
         self._submit(self._broadcast(payload))
 
