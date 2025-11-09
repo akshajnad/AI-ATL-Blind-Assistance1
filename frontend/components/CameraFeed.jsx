@@ -22,6 +22,8 @@ const CameraFeed = forwardRef(({
   useEffect(() => {
     if (!isActive) return
 
+    setIsReady(false)
+
     async function startCamera() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -34,9 +36,16 @@ const CameraFeed = forwardRef(({
         })
 
         if (videoRef.current) {
-          videoRef.current.srcObject = stream
+          const videoElement = videoRef.current
+          videoElement.onloadedmetadata = () => {
+            if (canvasRef.current) {
+              canvasRef.current.width = videoElement.videoWidth || 640
+              canvasRef.current.height = videoElement.videoHeight || 480
+            }
+            setIsReady(true)
+          }
+          videoElement.srcObject = stream
           streamRef.current = stream
-          setIsReady(true)
           setError(null)
         }
       } catch (err) {
@@ -50,6 +59,9 @@ const CameraFeed = forwardRef(({
     return () => {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop())
+      }
+      if (videoRef.current) {
+        videoRef.current.onloadedmetadata = null
       }
     }
   }, [isActive])
@@ -76,6 +88,10 @@ const CameraFeed = forwardRef(({
       const video = videoRef.current
 
       if (canvas && video) {
+        if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+          canvas.width = video.videoWidth || canvas.width
+          canvas.height = video.videoHeight || canvas.height
+        }
         const ctx = canvas.getContext('2d')
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
         const frameData = canvas.toDataURL('image/jpeg', 0.8)
