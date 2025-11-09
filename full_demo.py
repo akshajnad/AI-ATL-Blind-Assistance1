@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import argparse
@@ -36,6 +37,7 @@ WINDOW_YOLO = "YOLO Detections"
 WINDOW_DEPTH = "MiDaS Depth"
 
 INACTIVITY_TIMEOUT = 15.0  # seconds of silence before ending the convo
+FRAME_BROADCAST_INTERVAL = 1.0 / 24.0  # ~24 FPS for frontend preview
 
 
 class SpeechListener:
@@ -144,8 +146,8 @@ class ProximityBeepController:
             time.sleep(0.04)
 
 
-def frame_to_base64(frame: np.ndarray) -> str:
-    success, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+def frame_to_base64(frame: np.ndarray, *, quality: int = 85) -> str:
+    success, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
     if not success:
         raise RuntimeError("Failed to encode frame as JPEG")
     return base64.b64encode(encoded.tobytes()).decode("utf-8")
@@ -364,7 +366,12 @@ def main() -> None:
         choices=[Environment.INDOOR.value, Environment.OUTDOOR.value],
         default=Environment.INDOOR.value,
     )
-    parser.add_argument("--interval", type=float, default=2.0, help="Seconds between automatic vision refreshes")
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=0.75,
+        help="Seconds between automatic vision refreshes",
+    )
     parser.add_argument("--prompt", type=str, default=None, help="Optional custom system instructions for SnowFlake")
     parser.add_argument("--voice", action="store_true", help="Speak Snowflake responses via ElevenLabs")
     parser.add_argument("--listen-time", type=float, default=7.0, help="Max seconds per utterance")
@@ -421,6 +428,7 @@ def main() -> None:
 
     metadata: Optional[FrameMetadata] = None
     last_run = 0.0
+    last_frame_broadcast = 0.0
     last_response: Optional[FrameAnalysisResponse] = None
     conversation_active = False
     last_user_activity = 0.0
@@ -449,6 +457,21 @@ def main() -> None:
             now = time.time()
             speech_audio = listener.get_audio()
             should_refresh = now - last_run >= args.interval
+
+            if (
+                metadata is not None
+                and now - last_frame_broadcast >= FRAME_BROADCAST_INTERVAL
+            ):
+                try:
+                    preview_base64 = frame_to_base64(frame, quality=70)
+                except Exception as exc:
+                    print(f"[STREAM] Failed to encode frame for preview: {exc}")
+                else:
+                    broadcast.publish_frame(
+                        preview_base64,
+                        (metadata.width, metadata.height),
+                    )
+                    last_frame_broadcast = now
 
             transcript_for_wake: Optional[str] = None
             if speech_audio:
