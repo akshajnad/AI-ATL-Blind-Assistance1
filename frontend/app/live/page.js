@@ -72,6 +72,13 @@ export default function LivePage() {
 
   // Handle detection from backend
   const handleDetection = (data) => {
+    if (data?.dimensions?.width && data?.dimensions?.height) {
+      setCameraDimensions({
+        width: Math.round(data.dimensions.width),
+        height: Math.round(data.dimensions.height)
+      })
+    }
+
     // Update detections
     if (data.objects) {
       const formattedDetections = data.objects.map(obj => ({
@@ -85,15 +92,16 @@ export default function LivePage() {
     }
 
     // Update caption and speak
-    if (data.message) {
-      setCaption(data.message)
+    const captionText = data.message || data.visionSummary
+    if (captionText) {
+      setCaption(captionText)
 
       // Debounce speech (don't speak more than once per 3 seconds)
       const now = Date.now()
       if (now - lastSpeechRef.current > 3000) {
         lastSpeechRef.current = now
         setIsSpeaking(true)
-        voiceRef.current?.speak(data.message)
+        voiceRef.current?.speak(captionText)
         setTimeout(() => setIsSpeaking(false), 2000)
       }
     }
@@ -102,7 +110,14 @@ export default function LivePage() {
   // Handle camera frames
   const handleFrame = (frameData) => {
     if (socketRef.current?.isConnected()) {
-      socketRef.current.sendFrame(frameData)
+      const dimensions = cameraRef.current?.getVideoDimensions?.() || { width: 640, height: 480 }
+      const frameId = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}`
+      socketRef.current.sendFrame(frameData, {
+        frameId,
+        environment: 'indoor',
+        width: dimensions.width,
+        height: dimensions.height,
+      })
     }
   }
 

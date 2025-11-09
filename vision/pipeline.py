@@ -83,8 +83,12 @@ class VisionPipeline:
         self.depth_model = MiDaSDepthEstimator(model_type=depth_model_type)
         self._last_depth_map: Optional[np.ndarray] = None
 
-    def process(self, payload: FrameAnalysisRequest) -> FrameAnalysisResponse:
-        frame = self._decode_frame(payload.image_base64)
+    def process(
+        self,
+        payload: FrameAnalysisRequest,
+        frame: Optional[np.ndarray] = None,
+    ) -> FrameAnalysisResponse:
+        frame = self._decode_frame(payload.image_base64) if frame is None else frame
         depth_map = self.depth_model.predict(frame)
         self._last_depth_map = depth_map
         if payload.environment == Environment.OUTDOOR:
