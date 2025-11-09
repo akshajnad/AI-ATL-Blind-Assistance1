@@ -12,6 +12,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
+import pygame
 import speech_recognition as sr
 from pydub import AudioSegment
 from pydub.playback import play
@@ -33,6 +34,90 @@ WINDOW_YOLO = "YOLO Detections"
 WINDOW_DEPTH = "MiDaS Depth"
 
 INACTIVITY_TIMEOUT = 45.0  # seconds of silence before ending the convo
+PROXIMITY_THRESHOLD = 1.0  # meters - play alert if object is closer than this
+
+
+class ProximityAlert:
+    """Handles proximity alert sounds."""
+    
+    def __init__(self):
+        """Initialize pygame mixer for playing alert sounds."""
+        pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
+        self._alert_sound = None
+        self._last_alert_time = 0.0
+        self._alert_cooldown = 2.0  # seconds between alerts to avoid spam
+        
+    def create_alert_sound(self):
+        """Create a simple beep sound programmatically."""
+        sample_rate = 22050
+        duration = 0.3  # seconds
+        frequency = 800  # Hz
+        
+        # Generate a sine wave beep
+        samples = int(sample_rate * duration)
+        wave = np.sin(2 * np.pi * frequency * np.linspace(0, duration, samples))
+        
+        # Apply envelope to avoid clicks
+        envelope = np.ones(samples)
+        fade_samples = int(sample_rate * 0.05)
+        envelope[:fade_samples] = np.linspace(0, 1, fade_samples)
+        envelope[-fade_samples:] = np.linspace(1, 0, fade_samples)
+        wave = wave * envelope
+        
+        # Convert to 16-bit PCM
+        wave = (wave * 32767).astype(np.int16)
+        
+        # Create stereo sound
+        stereo_wave = np.column_stack((wave, wave))
+        
+        # Create pygame Sound object
+        sound = pygame.sndarray.make_sound(stereo_wave)
+        return sound
+    
+    def initialize(self):
+        """Initialize the alert sound."""
+        try:
+            self._alert_sound = self.create_alert_sound()
+            print("[ALERT] Proximity alert system initialized")
+        except Exception as exc:
+            print(f"[ALERT] Warning: Could not initialize alert sound: {exc}")
+    
+    def check_and_alert(self, response: FrameAnalysisResponse) -> bool:
+        """
+        Check if any objects are within proximity threshold and play alert.
+        
+        Returns:
+            True if alert was played, False otherwise
+        """
+        if self._alert_sound is None:
+            return False
+        
+        now = time.time()
+        
+        # Check cooldown
+        if now - self._last_alert_time < self._alert_cooldown:
+            return False
+        
+        # Find closest object
+        closest_distance = float('inf')
+        closest_object = None
+        
+        for obj in response.objects:
+            if obj.relative_depth_m is not None and obj.relative_depth_m < closest_distance:
+                closest_distance = obj.relative_depth_m
+                closest_object = obj
+        
+        # Trigger alert if within threshold
+        if closest_distance <= PROXIMITY_THRESHOLD:
+            try:
+                self._alert_sound.play()
+                self._last_alert_time = now
+                print(f"[ALERT] ⚠️  {closest_object.label} detected at {closest_distance:.2f}m!")
+                return True
+            except Exception as exc:
+                print(f"[ALERT] Error playing sound: {exc}")
+        
+        return False
 
 
 class SpeechListener:
@@ -122,9 +207,13 @@ def draw_yolo_view(frame: np.ndarray, response: FrameAnalysisResponse) -> np.nda
         y_min = int(obj.bounding_box.y_min * h)
         x_max = int(obj.bounding_box.x_max * w)
         y_max = int(obj.bounding_box.y_max * h)
-        cv2.rectangle(view, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2, cv2.LINE_AA)
+        
+        # Use red color for proximity alerts
+        color = (0, 0, 255) if (obj.relative_depth_m and obj.relative_depth_m <= PROXIMITY_THRESHOLD) else (0, 255, 0)
+        cv2.rectangle(view, (x_min, y_min), (x_max, y_max), color, 2, cv2.LINE_AA)
+        
         label = f"{obj.label} ({obj.confidence:.2f})"
-        cv2.putText(view, label, (x_min, max(18, y_min - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2, cv2.LINE_AA)
+        cv2.putText(view, label, (x_min, max(18, y_min - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
     cv2.putText(view, "YOLO detections", (16, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
     return view
 
@@ -137,12 +226,26 @@ def draw_overlay(frame: np.ndarray, response: FrameAnalysisResponse, environment
         cv2.line(annotated, (i * w // 3, 0), (i * w // 3, h), grid_color, 1, cv2.LINE_AA)
         cv2.line(annotated, (0, i * h // 3), (w, i * h // 3), grid_color, 1, cv2.LINE_AA)
 
+    # Check for proximity alerts
+    has_proximity_alert = any(
+        obj.relative_depth_m and obj.relative_depth_m <= PROXIMITY_THRESHOLD 
+        for obj in response.objects
+    )
+
     for obj in response.objects:
         x_min = int(obj.bounding_box.x_min * w)
         y_min = int(obj.bounding_box.y_min * h)
         x_max = int(obj.bounding_box.x_max * w)
         y_max = int(obj.bounding_box.y_max * h)
-        color = (0, 200, 255) if obj.quadrant.value == "center" else (0, 200, 0)
+        
+        # Use red for proximity alerts, orange for center, green otherwise
+        if obj.relative_depth_m and obj.relative_depth_m <= PROXIMITY_THRESHOLD:
+            color = (0, 0, 255)  # Red for close objects
+        elif obj.quadrant.value == "center":
+            color = (0, 200, 255)  # Orange for center
+        else:
+            color = (0, 200, 0)  # Green for normal
+            
         cv2.rectangle(annotated, (x_min, y_min), (x_max, y_max), color, 2, cv2.LINE_AA)
         depth_text = f"{obj.relative_depth_m:.2f}" if obj.relative_depth_m is not None else "n/a"
         cv2.putText(
@@ -168,6 +271,11 @@ def draw_overlay(frame: np.ndarray, response: FrameAnalysisResponse, environment
     # Show status
     status_color = (0, 255, 255) if "PROCESSING" in status else (0, 255, 0)
     cv2.putText(annotated, status, (18, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2, cv2.LINE_AA)
+    
+    # Show proximity warning
+    if has_proximity_alert:
+        warning_text = f"⚠️  PROXIMITY ALERT - Object within {PROXIMITY_THRESHOLD}m"
+        cv2.putText(annotated, warning_text, (18, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
 
     if llm_text:
         y = h - 90
@@ -252,6 +360,9 @@ def build_detailed_vision_summary(response: FrameAnalysisResponse) -> str:
             obj_descriptions = []
             for obj in objects:
                 depth_str = f"{obj.relative_depth_m:.1f} meters away" if obj.relative_depth_m else "unknown distance"
+                # Add proximity warning to description
+                if obj.relative_depth_m and obj.relative_depth_m <= PROXIMITY_THRESHOLD:
+                    depth_str += " ⚠️ VERY CLOSE"
                 obj_descriptions.append(f"{obj.label} ({depth_str})")
             
             parts.append(f"- In the {quadrant.replace('_', ' ')}: {', '.join(obj_descriptions)}")
@@ -281,6 +392,7 @@ def run_cycle(
     assistant,
     snowflake: SnowflakeLLM,
     synthesize_voice: bool,
+    proximity_alert: ProximityAlert,
 ) -> FrameAnalysisResponse:
     #print("\n" + "="*80)
     #print("[CYCLE] START")
@@ -301,6 +413,9 @@ def run_cycle(
     #print("[1/5] Vision pipeline...")
     response = pipeline.process(request)
     #print(f"[1/5] ✓ Found {len(response.objects)} objects")
+    
+    # Check for proximity alerts
+    proximity_alert.check_and_alert(response)
     
     # Log what we detected
     for obj in response.objects:
@@ -395,6 +510,7 @@ def main() -> None:
     parser.add_argument("--prompt", type=str, default=None, help="Optional custom system instructions")
     parser.add_argument("--voice", action="store_true", help="Enable voice synthesis")
     parser.add_argument("--listen-time", type=float, default=8.0, help="Max seconds per utterance")
+    parser.add_argument("--no-alert", action="store_true", help="Disable proximity alert sounds")
     args = parser.parse_args()
 
     from config import ELEVENLABS_API_KEY, SNOWFLAKE_USER, SNOWFLAKE_ACCOUNT, SNOWFLAKE_MODEL, SNOWFLAKE_PASSWORD
@@ -412,6 +528,11 @@ def main() -> None:
         role="ACCOUNTADMIN",
         model=SNOWFLAKE_MODEL,
     )
+    
+    # Initialize proximity alert system
+    proximity_alert = ProximityAlert()
+    if not args.no_alert:
+        proximity_alert.initialize()
 
     cap = cv2.VideoCapture(args.camera, cv2.CAP_DSHOW)
     if not cap.isOpened():
@@ -425,6 +546,7 @@ def main() -> None:
     listener.start()
     
     #print(f"\nVOICE: {'ENABLED' if args.voice else 'DISABLED'}")
+    #print(f"PROXIMITY ALERT: {'ENABLED' if not args.no_alert else 'DISABLED'}")
     #print(f"Say wake phrase to start\n")
 
     environment = Environment(args.environment)
@@ -505,6 +627,7 @@ def main() -> None:
                             assistant=assistant,
                             snowflake=snowflake,
                             synthesize_voice=args.voice,
+                            proximity_alert=proximity_alert,
                         )
                         last_response = response
                         last_run = now
@@ -535,6 +658,10 @@ def main() -> None:
                 response = pipeline.process(request)
                 last_response = response
                 last_run = now
+                
+                # Check for proximity alerts during periodic refresh too
+                if not args.no_alert:
+                    proximity_alert.check_and_alert(response)
 
             # Timeout
             if conversation_active and now - last_user_activity > INACTIVITY_TIMEOUT:
@@ -556,6 +683,7 @@ def main() -> None:
         cap.release()
         cv2.destroyAllWindows()
         listener.stop()
+        pygame.mixer.quit()
 
 
 if __name__ == "__main__":
