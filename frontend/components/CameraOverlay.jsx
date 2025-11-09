@@ -16,10 +16,14 @@ export default function CameraOverlay({ detections = [], width, height, classNam
   // Draw AR corner brackets on canvas
   useEffect(() => {
     const canvas = canvasRef.current
-    if (!canvas || !detections.length) return
+    if (!canvas || !width || !height) return
 
     const ctx = canvas.getContext('2d')
     ctx.clearRect(0, 0, width, height)
+
+    if (!detections.length) {
+      return
+    }
 
     detections.forEach((det, index) => {
       const [x1, y1, x2, y2] = det.bbox
