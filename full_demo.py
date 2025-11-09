@@ -395,7 +395,7 @@ def main() -> None:
     recognizer = sr.Recognizer()
     microphone = sr.Microphone()
     listener = SpeechListener(recognizer, microphone, phrase_time_limit=args.listen_time)
-    beep_controller = ProximityBeepController()
+    # beep_controller = ProximityBeepController()
     print(f"[VOICE] Background listener ready (phrase limit {args.listen_time}s). Speak any time.")
 
     environment = Environment(args.environment)
@@ -476,10 +476,10 @@ def main() -> None:
                 )
                 last_response = response
                 last_run = now
-                beep_controller.update(
-                    nearest_object_depth(response),
-                    center_object_depth(response),
-                )
+                # beep_controller.update(
+                #     nearest_object_depth(response),
+                #     center_object_depth(response),
+                # )
                 log_packages(response)
                 if response.user_transcript:
                     last_user_activity = now
@@ -499,10 +499,10 @@ def main() -> None:
                 assistant.reset_history()
 
             if last_response is not None:
-                beep_controller.update(
-                    nearest_object_depth(last_response),
-                    center_object_depth(last_response),
-                )
+                # beep_controller.update(
+                #     nearest_object_depth(last_response),
+                #     center_object_depth(last_response),
+                # )
                 annotated = draw_overlay(frame, last_response, environment, last_response.llm_response)
                 yolo_view = draw_yolo_view(frame, last_response)
                 depth_view = render_depth(pipeline.last_depth_map, frame.shape[:2])
@@ -513,7 +513,7 @@ def main() -> None:
         cap.release()
         cv2.destroyAllWindows()
         listener.stop()
-        beep_controller.stop()
+        # beep_controller.stop()
 
 
 if __name__ == "__main__":
