@@ -26,6 +26,7 @@ export default function CameraPage() {
   const [environment] = useState('indoor')
 
   const socketRef = useRef(null)
+  const feedRef = useRef(null)
 
   const updateCameraDimensions = useCallback(({ width, height }) => {
     if (typeof width !== 'number' || typeof height !== 'number') {
@@ -98,6 +99,7 @@ export default function CameraPage() {
     })
 
     socketRef.current = socket
+    const feedHandle = feedRef.current
     setConnectionStatus('connecting')
     setCaption(INITIAL_CAPTION)
 
@@ -134,6 +136,7 @@ export default function CameraPage() {
       socket.off('detection', handleDetection)
       socket.disconnect()
       socketRef.current = null
+      feedHandle?.clearFrame()
     }
   }, [handleDetection])
 
@@ -152,6 +155,7 @@ export default function CameraPage() {
   return (
     <div className="relative flex h-screen w-screen items-center justify-center overflow-hidden bg-black text-white">
       <CameraFeed
+        ref={feedRef}
         isActive
         frame={frameData}
         status={caption}
