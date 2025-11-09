@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import base64
 import sys
+import asyncio
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 
 from config import get_settings
 from ElevenLabs.main import get_assistant
@@ -14,11 +16,21 @@ if __package__ in (None, ""):
     sys.path.append(str(Path(__file__).resolve().parent))
     from integrations.snowflake_client import SnowflakeLLM
     from pipeline import VisionPipeline
-    from schemas import FrameAnalysisRequest, FrameAnalysisResponse
+    from schemas import (
+        Environment,
+        FrameAnalysisRequest,
+        FrameAnalysisResponse,
+        FrameMetadata,
+    )
 else:  # pragma: no cover
     from .integrations.snowflake_client import SnowflakeLLM
     from .pipeline import VisionPipeline
-    from .schemas import FrameAnalysisRequest, FrameAnalysisResponse
+    from .schemas import (
+        Environment,
+        FrameAnalysisRequest,
+        FrameAnalysisResponse,
+        FrameMetadata,
+    )
 
 
 settings = get_settings()
@@ -99,3 +111,95 @@ async def analyze(payload: FrameAnalysisRequest) -> FrameAnalysisResponse:
     if update_data:
         response = response.model_copy(update=update_data)
     return response
+
+
+def _extract_base64(data_url: str) -> str:
+    if "," in data_url:
+        return data_url.split(",", 1)[1]
+    return data_url
+
+
+def _serialize_detection(response: FrameAnalysisResponse) -> dict:
+    return {
+        "type": "detection",
+        "frame_id": response.frame_id,
+        "vision_summary": response.vision_summary,
+        "message": response.vision_summary,
+        "center_distance": response.center_distance.model_dump(),
+        "objects": [
+            {
+                "label": obj.label,
+                "confidence": obj.confidence,
+                "bbox": [
+                    obj.bounding_box.x_min,
+                    obj.bounding_box.y_min,
+                    obj.bounding_box.x_max,
+                    obj.bounding_box.y_max,
+                ],
+                "quadrant": obj.quadrant,
+                "distance": obj.relative_depth_m,
+            }
+            for obj in response.objects
+        ],
+        "notes": response.notes,
+    }
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket) -> None:
+    await websocket.accept()
+    last_response: Optional[FrameAnalysisResponse] = None
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+            message_type = data.get("type")
+
+            if message_type == "frame":
+                image_data = data.get("data")
+                if not image_data:
+                    await websocket.send_json({"type": "error", "message": "Frame payload missing data"})
+                    continue
+
+                width = max(int(data.get("width") or 640), 1)
+                height = max(int(data.get("height") or 480), 1)
+                environment_raw = data.get("environment") or Environment.INDOOR.value
+
+                try:
+                    environment = Environment(environment_raw)
+                except ValueError:
+                    environment = Environment.INDOOR
+
+                frame_id = data.get("frame_id") or data.get("timestamp") or "frame"
+                payload = FrameAnalysisRequest(
+                    frame_id=str(frame_id),
+                    timestamp=datetime.utcnow(),
+                    frame_metadata=FrameMetadata(width=width, height=height),
+                    image_base64=_extract_base64(image_data),
+                    environment=environment,
+                )
+
+                try:
+                    response = await asyncio.to_thread(pipeline.process, payload)
+                except Exception as exc:  # pragma: no cover - runtime diagnostics
+                    await websocket.send_json({"type": "error", "message": f"Processing failed: {exc}"})
+                    continue
+
+                last_response = response
+                await websocket.send_json(_serialize_detection(response))
+
+            elif message_type == "describe":
+                if last_response is not None:
+                    await websocket.send_json(_serialize_detection(last_response))
+                else:
+                    await websocket.send_json(
+                        {
+                            "type": "detection",
+                            "objects": [],
+                            "message": "Vision system ready. Awaiting first frame.",
+                        }
+                    )
+            else:
+                await websocket.send_json({"type": "error", "message": "Unsupported message type"})
+    except WebSocketDisconnect:
+        return

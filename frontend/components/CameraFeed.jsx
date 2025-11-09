@@ -7,8 +7,9 @@ import { motion } from 'framer-motion'
  * CameraFeed component - Simple video stream for camera input
  * AR overlays are now handled by the CameraOverlay component
  */
-const CameraFeed = forwardRef(({
+const CameraFeed = forwardRef(({ 
   onFrame,
+  onDimensions,
   isActive = true,
   className = ''
 }, ref) => {
@@ -34,10 +35,29 @@ const CameraFeed = forwardRef(({
         })
 
         if (videoRef.current) {
-          videoRef.current.srcObject = stream
+          const video = videoRef.current
+          video.srcObject = stream
           streamRef.current = stream
-          setIsReady(true)
           setError(null)
+
+          const handleLoadedMetadata = () => {
+            const width = video.videoWidth || 640
+            const height = video.videoHeight || 480
+
+            if (canvasRef.current) {
+              canvasRef.current.width = width
+              canvasRef.current.height = height
+            }
+
+            onDimensions?.({ width, height })
+            setIsReady(true)
+          }
+
+          video.addEventListener('loadedmetadata', handleLoadedMetadata, { once: true })
+
+          if (video.readyState >= 1) {
+            handleLoadedMetadata()
+          }
         }
       } catch (err) {
         console.error('Camera error:', err)
@@ -52,7 +72,7 @@ const CameraFeed = forwardRef(({
         streamRef.current.getTracks().forEach(track => track.stop())
       }
     }
-  }, [isActive])
+  }, [isActive, onDimensions])
 
   // Expose video dimensions to parent
   useImperativeHandle(ref, () => ({
@@ -77,14 +97,27 @@ const CameraFeed = forwardRef(({
 
       if (canvas && video) {
         const ctx = canvas.getContext('2d')
+        const width = video.videoWidth
+        const height = video.videoHeight
+
+        if (!width || !height) {
+          return
+        }
+
+        if (canvas.width !== width || canvas.height !== height) {
+          canvas.width = width
+          canvas.height = height
+          onDimensions?.({ width, height })
+        }
+
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
         const frameData = canvas.toDataURL('image/jpeg', 0.8)
-        onFrame(frameData)
+        onFrame?.(frameData)
       }
     }, 100) // 10 FPS
 
     return () => clearInterval(interval)
-  }, [isReady, onFrame])
+  }, [isReady, onFrame, onDimensions])
 
   if (error) {
     return (
